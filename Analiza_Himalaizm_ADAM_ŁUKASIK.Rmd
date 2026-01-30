@@ -1,0 +1,476 @@
+---
+title: "Analiza ośmiotysięczników w Nepalu"
+author: "Adam Łukasik"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, error = F)
+```
+
+# Wprowadzenie
+
+Celem niniejszego projektu jest dogłębna analiza danych dotycząca wypraw na osiem najwyższych szczytów w Nepalu. Analiza ma na celu zbadanie czynników wpływających na sukces lub śmierć wspinaczy oraz zrozumienie demografii himalaistów na przestrzeni lat 1906–2020.  
+Dane pochodzą z [The Himalayan Database](https://www.kaggle.com/datasets/majunbajun/himalayan-climbing-expeditions), jest to zbiór wszystkich wypraw górskich w nepalskich Himalajach. Są one oparte na archiwach dziennikarki Elizabeth Hawley. Dane obejmują ekspedycje z ponad 465 szczytów w Nepalu, jednak w analizie skupię się na 8 najwyższych.
+
+
+# Pytania badawcze
+
+1. Czy wiek wspinaczy jest taki sam jak Szerpów?
+2. Czy wiek wspinaczy różni się ze względu na płeć?
+3. Kto jest skuteczniejszy w zdobywaniu szczytów?
+4. W jakim stopniu użycie tlenu zwiększa szansę na zdobycie szczytu?
+5. Jak zmieniał się trend na himalaizm w badanym okresie?
+6. Jak zmienia się liczba wejść w ciągu roku, czy himalaizm jest sportem sezonowym?
+7. Która pora roku jest najbardziej wymagająca dla wspinaczy?
+8. Z jakich państw najczęściej pochodzą wspinający się?
+9. Jak plasują się Polacy w porównaniu do reszty świata?
+
+
+# Zmienne
+
+* Nazwa Szczytu (tekst)
+* Rok (liczba)
+* Pora roku (tekst)
+* Wiek (liczba)
+* Płeć (tekst)
+* Obywatelstwo (tekst)
+* Zatrudnienie (T/F)
+* Użycie tlenu (T/F)
+* Sukces (T/F)
+* Śmierć (T/F)
+
+# Pakiety
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(psych)
+library(knitr)
+library(tseries)
+```
+
+# Wczytanie i zapoznanie się z danymi
+
+```{r}
+dane <- read.csv("members.csv")
+```
+
+Wybieram potrzebne zmienne, w mojej analizie skupię się na 8 najwyższych szczytach w tym zestawie, dlatego przygotowuję zmienną `peaks` z potrzebnymi nazwami.
+
+```{r}
+peaks <- c("Everest", "Annapurna I", "Manaslu", "Cho Oyu", "Lhotse", "Makalu", "Dhaulagiri I", "Kangchenjunga")
+members <- dane %>%
+  filter(peak_name %in% peaks) %>%
+  select(peak_name, year, season, age, sex, citizenship, hired, oxygen_used, success, died) %>%
+  arrange(year)
+
+```
+
+```{r, include=FALSE, echo=FALSE}
+members$year <- members$year + 1
+```
+
+Teraz mogę przejść do sprawdzenia moich danych.
+
+```{r}
+kable(head( members, 5))
+```
+
+```{r}
+kable(tail(members, 5))
+```
+
+```{r}
+str(members)
+```
+
+Zestaw danych jest bardzo zróżnicowany (zmienne tekstowe, ilościowe i logiczne). Niektóre ze zmiennych powinny być faktorami jak `sex` oraz `peak_name`, ponieważ badamy tylko 8 wybranych szczytów.
+
+```{r}
+members$peak_name <- as.factor(members$peak_name)
+members$sex <- as.factor(ifelse(members$sex == "M", "Male", "Female"))
+```
+
+A co ze zmienną `season`, sprawdzę, jakie przyjmuje wartości.
+
+```{r}
+table(members$season)
+```
+
+Teraz jestem pewnien, że to też powinien być faktor, dodam jeszcze prawidłową kolejność pór roku.
+
+```{r}
+members$season <- factor(members$season, levels = c("Spring", "Summer", "Autumn", "Winter"))
+```
+
+Zmienne logiczne zostawiam, ułatwi to obliczenia w dalszej części analizy. Zajmę się teraz zmienną `citizenship` opisującą pochodzenie osób.
+
+```{r, include=FALSE}
+unique(members$citizenship)
+```
+
+Widzę, że pojawiają się przypadki, w których osoba ma podwójne obywatelstwo, aby nie duplikowac danych nie będę ich rozdzielał, tylko stworzę osobną kategorię `Other`.
+
+```{r}
+other <- grep("/", members$citizenship, value = T)
+members$citizenship <- ifelse(members$citizenship %in% other, "Other", members$citizenship)
+```
+
+Zauważyłem jeszcze dwie rzeczy: `USSR` i `W Germany`, ponieważ dane pochodzą z XX wieku, jednak, aby uprościć moją analizę, dopiszę te zmienne do obecnych.
+
+```{r}
+members$citizenship <- ifelse(members$citizenship == "W Germany", "Germany", members$citizenship)
+members$citizenship <- ifelse(members$citizenship == "USSR", "Russia", members$citizenship)
+```
+
+Teraz mogę wyznaczyć statystyki opisowe.
+
+```{r}
+summary(members)
+```
+
+W zestawie znajduje się 45 726 danych, z lat 1906-2020. Widzimy teraz jak rozkładają się dane, jedynym problemem są braki w `age`.  
+Mamy około 1500 brakującyh danych jednak nie będę ich usuwać, ponieważ mogą się w nich zawierać ważne dane na temat np. zgonu czy sukcesu. Więc zostawię braki, aby nie zaniżyć pozostałych statystyk, a przy obliczeniach dotyczących wieku użyję `na.rm = T`.  
+
+Skupię się bardziej na wieku wspinaczy, jako że to jedynna zmienna ilościowa.
+
+```{r}
+kable(describe(members$age))
+```
+
+Średni wiek to 37 lat, przy odchyleniu standardowym 10 lat, więc typowy wspinacz to osoba w wieku od 27 do 47 lat. Jest to spowodowane tym, że himalaizm wymaga doświadczenia, jak i dużych środków pieniężnych. Potwierdza to także wartość skośności (= 0.61), mamy doczynienia z umiarkowaną asymetrią prawostronną.
+
+## Podstawowe informacje na temat szczytów
+
+```{r}
+tabela_szczyty <- members %>%
+  group_by(peak_name) %>%
+  summarise(liczba_wspinaczy = n(),
+            średni_wiek = round(mean(age, na.rm = T),2),
+            procent_sukcesy = round(mean(success)*100,2),
+            procent_śmiertelność = round(mean(died)*100,2)) %>%
+  arrange(desc(liczba_wspinaczy)) %>%
+  kable(col.names = c("Nazwa Szczytu", "Liczba wspinaczy", "Średni wiek", "Odsetek sukcesów (%)", "Odsetek zgonów (%)"))
+```
+
+
+Dostałem wstępne informacje na temat badanych szczytów:  
+1. Everest jest najpopularniejszym szczytem, stanowi on około połowę danych. Pomimo że jest on najwyżej położony, to ma największy odsetek sukcesów.  
+2. Najbardziej wymagającym szczytem jest Annapurna posiada on zarówno najmniejszy odsetek sukseców, jak i największy odsetek zgonów, jest to spowodowane częstymi lawinami oraz ekstremalnymi warunkami pogodowymi.  
+3. Natomiast ośmiotysięcznik o najniższym odsetku wypadków śmiertelnych to Cho Oyu, co plasuje go jako najbezpieczniejszy szczyt do zdobycia.
+
+# Wiek
+
+## Czy wiek wspinaczy jest taki sam jak Szerpów?
+
+Sprawdźmy, jak wygląda rozkład z podziałem na osoby wspinające się prywatnie a zatrudnione.
+
+```{r fig.width=10}
+members %>%
+  ggplot() +
+  geom_density(mapping = aes(x = age, fill = hired), alpha = 0.5) +
+  labs(title = "Wiek a zatrudnienie",
+       x = "Wiek",
+       y= " ",
+       fill = "Zatrudniony") +
+  theme_minimal(base_size = 15) +
+  scale_fill_manual(values = c("FALSE" = "#0072B2", "TRUE" = "#E69F00")) +
+  scale_x_continuous(breaks = seq(10, 90, 10)) 
+```
+
+Widoczna jest duża rozbieżność, osoby zatrudnione czyli Szerpowie są zdecydowanie młodsi. To osoby lokalne pracujące jako przewodnicy lub tragarze, są przystosowani do życia na dużych wysokościach. Do takiej pracy potrzebne są osoby z dużym doświadczeniem, lecz przede wszystkim o wysokiej wydolności.
+
+## Czy średni wiek wspinaczy jest istotnie wiekszy niż średni wiek Szerpów?
+
+Hipoteza badawcza:  
+
+H~0~ : m~1~ = m~2~  
+H~1~ : m~1~ > m~2~  
+
+gdzie:  
+m~1~ -- średni wiek wspinaczy (`hired = F`)  
+m~2~ -- średni wiek Szerpów (`hired = T`)
+
+Podzielę najpierw nasz zbiór ze względu na zmienną `hired`, a następnie sprawdzę zgodność z rozkładem normalnym. Użyję testu Jarque Bera, ponieważ próba jest bardzo duża.
+
+```{r}
+sherpas <- members %>%
+  filter(hired == T)
+
+sherpas %>%
+  filter(!is.na(age)) %>%
+  select(age) %>%
+  pull() %>%
+  jarque.bera.test()
+
+```
+
+```{r}
+climbers <- members %>%
+  filter(hired == F)
+
+climbers %>%
+  filter(!is.na(age)) %>%
+  select(age) %>%
+  pull() %>%
+  jarque.bera.test()
+```
+
+Testy dla obu zbiorów z dużą pewnością wskazują, że nie można opisać rozkładu wieku za pomocą rozkładu normalnego. Zatem do sprawdzenia hipotezy na temat średniej wieku użyjemy testu Wilcoxona.
+
+
+```{r}
+wilcox.test(age ~ hired, data = members, alternative = "greater")
+```
+
+Wynik testu pokazuje, że H~0~ należy odrzucić (p < 0.05). Zatem mogę stwierdzić, że średni wiek wspinaczy jest istotnie większy od średniego wieku Szerpów.
+
+
+## Czy wiek wspinaczy różni się ze wględu na płeć?
+
+Sprawdzę to już na zbiorze `climbers`.
+
+```{r fig.width=10}
+climbers %>%
+  filter(age > 10) %>%
+  ggplot(mapping = aes(x = age, y = sex)) +
+  geom_violin(trim = T,
+              fill = "lightgrey",
+              color = "darkgrey") +
+    geom_boxplot(width = 0.4) +
+  labs(title = "Wiek wspinaczy z podziałem na płeć",
+       x = "Wiek",
+       y = "Płeć") + 
+  theme_light(base_size = 15) +
+  scale_x_continuous(breaks = seq(10, 90, 10)) 
+  
+```
+
+Wykresy pokazują, że płeć nie ma większego wpływu na wiek wspinaczy, szerokość pudełka jest podobna, jednak mediany różnią się o 1-2 lata. W przypadku mężczyzn widoczna jest wieksza liczba wartości odstających, czyli osób o starszym wieku. Przedstawione wykresy pokrywają się z wcześniejszym opisem rozkładu wieku dla całego zbioru, jednak wyniki nie zaniżają już młodzi Szerpowie.
+
+Sprawdźmy jeszcze, czy różnica wieku między płciami jest istotna statystycznie.
+
+Hipoteza badawcza:  
+
+H~0~ : m~1~ = m~2~  
+H~1~ : m~1~ != m~2~ 
+
+gdzie:  
+m~1~ -- średni wiek mężczyzn  
+m~2~ -- średni wiek kobiet
+
+```{r}
+wilcox.test(age ~ sex, data = climbers)
+```
+Mimo że powyższy wykres wskazywał na zbliżony rozkład wieku dla obu płci, to wynik testu Wilcoxona odrzuca H~0~ (p < 0.05), więc różnica w wieku wspinaczy i wspinaczek jest istotna statystycznie. Jest to spowodowane badaniem dużej próby, gdzie nawet nieduże różnice są traktowane jako istotne statystycznie.
+
+# Sukces 
+
+## Kto posiada większy odsetek sukcesów?
+
+```{r}
+
+climbers %>%
+  group_by(sex) %>%
+  summarise(total = n(),
+            win = sum(success),
+            success_per = round(mean(success)*100,2))%>%
+  kable(col.names = c("Płeć", "Liczba wejść", "Liczba sukcesów", "Odsetek sukcesów (%)"))
+  
+```
+
+Widzimy, że himalaizm jest zdominowany przez płeć męską, lecz mimo rzadszych kobiecych wypraw na ośmiotysięczniki, to im udaje się częściej wejść na szczyt z powodzeniem. Możliwe, że mniej kobiet decyduje się na ten ektremalny wyczyn, jedynie te w pełni przygotowane. Jednak musimy mieć na uwadze jak zróżnicowana jest liczba wejść wspinaczy i wspinaczek.
+
+## W jakim stopniu użycie tlenu zwiększa szansę na zdobycie szczytu?
+
+```{r fig.width=10}
+
+climbers %>%
+  ggplot() +
+  geom_bar(aes(x = oxygen_used, fill = success), color = "white",position = "fill") +
+  labs(title = "Zdobycie szczytu a użycie tlenu",
+       x = "Sukces",
+       y = "Odsetek wspinaczy (%)",
+       fill = "Użycie tlenu") +
+  theme_minimal(base_size = 15) +
+  scale_fill_manual(values = c("FALSE" = "#D55E00", "TRUE" = "#009E73")) + 
+  scale_y_continuous(labels = scales::percent)
+```
+
+Hipoteza badawcza:  
+
+H~0~ : zmienne `success` i `oxygen_used` są niezależne  
+H~1~ : zmienne `success` i `oxygen_used` są zależne  
+
+```{r}
+chisq.test(table(climbers$success, climbers$oxygen_used))
+```
+
+Wykres, jak i przeprowadzony test niezależności $\chi^2$ pokazują bardzo silny związek między użyciem tlenu a osiągnięciem sukcesu, który jest istotny statystycznie  (p < 0.05). Można zatem stwierdzić, że użycie tlenu podczas wyprawy na ośmiotysięczniki w dużym stopniu zwiększa szanse na zakończenie jej z powodzeniem.  
+Warto jednak dodać, że niektórzy celowo decydują się na wejście bez użycia tlenu, nazywane jest to "czystym himalaizmem", czyli zdobyciu szczytu bez dodatkowej pomocy.
+
+# Trend na himalaizm
+
+## Jak zmieniał się trend na himalaizm w badanym okresie?
+
+```{r fig.width=10}
+
+members %>%
+  group_by(year) %>%
+  summarise(total = n()) %>%
+  ggplot() +
+  geom_line(aes(year, total)) +
+  labs(title = "Zmiana liczby wejść na ośmiotysięczniki",
+       x = "lata (1906-2020)",
+       y = "Łączna liczba wejść") +
+  theme_light(base_size = 15) +
+  scale_x_continuous(breaks = seq(1900, 2020, 10)) 
+
+```
+
+Przez połowę badanego okresu wejścia na szczyty były raczej sporadyczne, liczba zwiększa się dopiero po 1950 roku, gdy Nepal otworzył swoje granice, a tym bardziej po zdobyciu Everest w 1953 roku przez Hillary'ego i Tenzinga w ramach brytyjskiej wyprawy. W późniejszych latach popularność himalaizmu rosła z roku na rok, było to spowodowane rozwojem gospodarczym (więcej osób mogło pozwolić sobie na taki wydatek), a w XXI wieku był to temat rozpowszechiony w mediach społecznościowy. Widoczne są także cykliczne załamania krzywej, przykładem jest duży spadek w roku 2015, kiedy w Nepalu doszło do mocnego trzęsienia ziemi, możliwość uzyskania pozwolenia na takie wejścia jest często zależna od sytuacji pogodowej.  
+Wykres kończy się gwałtownym spadkiem w 2020 roku, co natomiast było spowodowane rozpoczęciem się pandemi COVID-19, która miała swój początek właśnie na kontynencie azjatyckim.  
+
+```{r fig.height=10, fig.width=10}
+members %>%
+  group_by(year,peak_name) %>%
+  summarise(total = n()) %>%
+  ggplot(aes(year, total)) +
+  geom_line() +
+  labs(title = "Zmiana liczby wejść na  ośmiotysięczniki z podziałem na szczyty",
+       y = "Liczba wejść",
+       x = "Lata (1906 - 2020)") +
+  facet_wrap(~ peak_name, ncol = 2) +
+  theme_light(base_size = 15)
+```
+
+Gdy podzielimy dane ze względu na szczyty to sytuacja wygląda już trochę inaczej, od razu wyróżniają się trzej faworyci czyli Everest, Cho Oyu i Manaslu (co było już widoczne w tabeli), jednak to Everest ma kluczowy wpływ skalę. Reszta szczytów jest wybierana przez nielicznych wspinaczy, ze względu na mniejszy rozwój "turystyki" wspinaczkowej oraz wyższy stopień trudności.
+
+# Sezonowość
+
+## A jak zmienia się liczba wejść w ciągu roku?
+
+```{r}
+pory_roku <- table(members$season)
+kable(pory_roku, col.names = c("Pora roku", "Liczba osób"))
+
+```
+
+## Która pora roku jest najbardziej wymagająca dla wspinaczy?
+
+```{r fig.width=10}
+climbers %>%
+  group_by(season) %>%
+  summarise(sezon_per = mean(success)*100) %>%
+  ggplot() +
+  geom_col(aes(x = season, y =sezon_per),
+           color = "white") +
+  theme_minimal(base_size = 15) +
+  labs(title = "Pory roku a sukces",
+       x = "Pora roku",
+       y = "Odsetek sukcesów (%)")
+  
+```
+
+Dwie główne pory roku to wiosna i jesień. Zastanawiająca jest bardzo niska liczba wejść latem, które kojarzy się z dogodną pogodą do wspinaczki górskiej. Jednak w Nepalu jest to okres monsunów, które powodują często ekstremalne warunki pogodowe (intensywne wiatry, lawiny), wtedy wejście na szczyt jest praktycznie niemożliwe. Natomiast zimą mamy doczynienia z burzami śnieżnymi i krótkim dniem. Dlatego też jedyne okna pogodowe przypadają na maj i październik, wtedy napływ wspinaczy jest skumulowany.
+
+# Narodowość wspinaczy
+
+## Jakiej narodowości są uczestnicy wypraw?
+
+```{r fig.width=10}
+climbers %>%
+  group_by(citizenship) %>%
+  summarise(total = n(),
+              sukc_pro = round(mean(success)*100,2)) %>%
+  top_n(10, total) %>%
+  arrange(desc(total)) %>%
+  kable( col.names = c("Państwo", "Liczba wspinaczy", "Odsetek sukcesów (%)"), caption = "10 Państw o największej liczbie uczestników wypraw")
+
+```
+
+Zdecydowanie pod względem liczby wspinaczy dominują Stany Zjednoczone, jednak ciekawy jest fakt, że nie przekłada się to na skuteczność. To Chiny i Indie są w czołówce udanych wypraw, może to być powiązane z ich położeniem geograficznym i przystosowaniem do warunków lub lepszym przeszkoleniu do takich wypraw. Większość z tych państw, charakteryzuje dobra sytuacja finansowa, dlatego większa liczba obywateli może sobie pozwolić na tak kosztowny wyjazd, jednak często same pieniądze nie wystarczą.
+
+# Polska
+
+## Jak plasują się Polacy w porównaniu do reszty świata?
+
+```{r}
+climbers %>%
+  group_by(citizenship) %>%
+  filter(citizenship == "Poland") %>%
+  summarise(total = n(),
+              sukc_pro = round(mean(success)*100,2)) %>%
+  select(citizenship, total, sukc_pro) %>%
+  kable( col.names = c("Państwo", "Liczba Wspinaczy", "Odsetek sukcesów (%)"))
+  
+```
+
+
+```{r fig.width=10}
+climbers %>%
+  mutate(kategoria = ifelse(citizenship == "Poland", "Polska", "Reszta świata")) %>%
+  group_by(peak_name, kategoria) %>%
+  summarise(sukc_pro = mean(success)*100) %>%
+  ggplot() +
+  geom_col(mapping = aes(x = peak_name, y = sukc_pro, fill = kategoria), position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("Polska" = "#0072B2", "Reszta świata" = "#E69F00")) +
+  labs(title = "Skuteczność Polski vs Reszty świata",
+       y = "Odsetek sukcesów (%)",
+       x = "Nazwa szczytu",
+       fill = "Podział") +
+  theme_light(base_size = 15)
+
+
+  
+```
+Jak widać Polska nie jest liderem pod względem swojej skuteczności równej około 24%. Na większości szczytów plasuje się niżej niż reszta panstw. Jednakże wyróżnia się na najwyższej górze świata oraz na natrudniejszej z naszego zestawu, czyli Annapurnie. Wyniki przedstawione na wykresie mogą być jednak nie dokońca wiarygodne, ponieważ Polacy specyfikują się w bardziej ekstremalnej dziedzinie himalaizmu, czyli wyprawach zimowych.
+
+```{r fig.width=10}
+climbers %>%
+  filter(season == "Winter") %>%
+  mutate(kategoria = ifelse(citizenship == "Poland", "Polska", "Reszta świata")) %>%
+  group_by(peak_name, kategoria) %>%
+  summarise(sukc_pro = mean(success)*100) %>%
+  ggplot() +
+  geom_col(mapping = aes(x = peak_name, y = sukc_pro, fill = kategoria), position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("Polska" = "#0072B2", "Reszta świata" = "#E69F00")) +
+  labs(title = "Skuteczność Polski vs Reszty świata (Zima)",
+       y = "Odsetek sukcesów (%)",
+       x = "Nazwa szczytu",
+       fill = "Podział") +
+  theme_light(base_size = 15)
+```
+
+Gdy porównamy sam sezon zimowy to sytuacja zmienia się diametralnie, Polacy dominują nad resztą świata na większości szczytów. Największe różnice widoczne są na Lheotse i Annapurnie, dlatego Polacy są często nazywani "lodowymi wojownikami".
+
+## Dodatkowa ciekawostka o Polsce
+
+```{r}
+climbers %>%
+  filter(season == "Winter", success == TRUE) %>%
+  arrange(year) %>%
+  group_by(peak_name) %>%
+  slice(1) %>%
+  select(peak_name, year,age,  citizenship, oxygen_used, died) %>%
+  kable()
+
+
+```
+
+Dowiedzieliśmy się wcześniej, że zima to ulubiona pora roku Polaków, warto dodać, że to właśnie oni zdobyli aż 6 z 8 szczytów (w tym Everest) jako pierwsi w sezonie zimowym:  
+- Mount Everest, 17.02.1980. Leszek Cichy, Krzysztof Wielicki. Lider: Andrzej Zawada  
+- Manaslu, 12.01.1984. Maciej Berbeka, Ryszard Gajewski. Lider: Lech Korniszewski  
+- Cho Oyu, 12.02.1985. Maciej Berbeka, Maciej Pawlikowski, trzy dni później: Andrzej Zygmunt Heinrich, Jerzy Kukuczka. Lider: Andrzej Zawada  
+- Kanczendzonga, 11.01.1986. Jerzy Kukuczka, Krzysztof Wielicki. Lider: Andrzej Machnik  
+- Annapurna, 3.02.1987. Artur Hajzer, Jerzy Kukuczka. Lider: Jerzy Kukuczka  
+- Lhotse, 31.12.1988. Krzysztof Wielicki. Lider: Andrzej Zawada  
+
+# Zakończenie
+
+Przeprowadzona eksploracyjna analiza danych pozwoliła odpowiedzieć na postawione pytania badawcze. Himalaizm to złożona dziedzina, w której o sukcesie decyduje kombinacja przygotowania fizycznego (wiek), wsparcia technicznego (tlen, Szerpowie) oraz strategii (wybór pory roku). Pokazano jak ważną rolę pełnią Polacy w tej dziedzinie wspinaczek wysokogórskich.
+
